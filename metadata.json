@@ -1,0 +1,6 @@
+{
+  "name": "Baba Finance & Billing",
+  "description": "Sistema de gestão financeira e cobrança automatizada com persistência garantida via Firebase Firestore e sistema de backup/restauração.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
