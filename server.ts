@@ -84,7 +84,6 @@ async function startServer() {
       admin.initializeApp(adminConfig);
     } else {
       console.log("[BOOT] Firebase Admin already initialized. Project:", admin.app().options.projectId);
-      // If the already initialized project differs, it might cause PERMISSION_DENIED
       if (admin.app().options.projectId !== firebaseConfig.projectId && firebaseConfig.projectId) {
         console.warn(`[BOOT] Project ID mismatch! Config: ${firebaseConfig.projectId}, Environment: ${admin.app().options.projectId}`);
       }
@@ -101,37 +100,30 @@ async function startServer() {
       const dbId = firebaseConfig.firestoreDatabaseId;
       console.log(`[BOOT] Connecting to Firestore (Database: ${dbId || '(default)'})...`);
       
+      const potentialFirestore = dbId 
+        ? getFirestore(admin.app(), dbId)
+        : getFirestore(admin.app());
+      
+      // Connectivity check with timeout
+      console.log("[BOOT] Testing Firestore connectivity (3s timeout)...");
+      const connectivityTest = potentialFirestore.collection('app_settings').limit(1).get();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 3000));
+      
       try {
-        // Force the use of the specific project and database from config
-        const potentialFirestore = dbId 
-          ? getFirestore(admin.app(), dbId)
-          : getFirestore(admin.app());
-        
-        // Connectivity check - attempt a small read
-        console.log("[BOOT] Testing Firestore connectivity...");
-        try {
-          await potentialFirestore.collection('app_settings').limit(1).get();
-          firestore = potentialFirestore;
-          isFirestoreAccessible = true;
-          console.log("✅ [BOOT] Firestore connected and accessible.");
-        } catch (readErr: any) {
-          if (readErr.message.includes('PERMISSION_DENIED')) {
-            console.warn("⚠️ [BOOT] Firestore found but lacks read permissions (Setup likely incomplete/declined). Cloud sync will be disabled.");
-            firestore = null; // Don't use it if we can't read settings
-            isFirestoreAccessible = false;
-          } else {
-            throw readErr;
-          }
-        }
-      } catch (e: any) {
-        if (e.message.includes('PERMISSION_DENIED')) {
-          console.error("❌ [BOOT] Firestore PERMISSION_DENIED: The service account lacks permissions for this database instance.");
-          firestore = null;
-          isFirestoreAccessible = false;
+        await Promise.race([connectivityTest, timeoutPromise]);
+        firestore = potentialFirestore;
+        isFirestoreAccessible = true;
+        console.log("✅ [BOOT] Firestore connected and accessible.");
+      } catch (readErr: any) {
+        if (readErr.message === 'TIMEOUT') {
+          console.warn("⚠️ [BOOT] Firestore connectivity test timed out (3s). Proceeding with local-only mode.");
+        } else if (readErr.message.includes('PERMISSION_DENIED')) {
+          console.warn("⚠️ [BOOT] Firestore found but lacks read permissions. Cloud sync will be disabled.");
         } else {
-          console.error("❌ [BOOT] Firestore connection error:", e.message);
-          firestore = null;
+          console.warn("⚠️ [BOOT] Firestore connectivity test failed:", readErr.message);
         }
+        firestore = null;
+        isFirestoreAccessible = false;
       }
     } else {
       console.warn("[BOOT] Firebase Admin not initialized. Firestore functionality will be disabled.");
@@ -1448,11 +1440,13 @@ async function startServer() {
   // Global JSON Error Handler
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     console.error('[SERVER ERROR]', err);
-    res.status(err.status || 500).json({
-      error: true,
-      message: err.message || 'Ocorreu um erro interno no servidor',
-      code: err.code || 'INTERNAL_ERROR'
-    });
+    if (!res.headersSent) {
+      res.status(err.status || 500).json({
+        error: true,
+        message: err.message || 'Ocorreu um erro interno no servidor',
+        code: err.code || 'INTERNAL_ERROR'
+      });
+    }
   });
 
   // Vite
@@ -1482,7 +1476,3 @@ const serverInit = startServer().catch(err => {
 });
 
 export { startServer, serverInit };
-export default async (req: any, res: any) => {
-  const { app } = await startServer();
-  return app(req, res);
-};

@@ -722,13 +722,13 @@ export default function App() {
       } catch (e) {
         console.warn('[WARN] Resposta não é JSON:', textResponse);
         if (!res.ok) {
-           throw new Error('Erro no servidor: ' + textResponse.substring(0, 50));
+           throw new Error('Erro no servidor: ' + (textResponse.substring(0, 100) || 'Resposta vazia'));
         }
         savedPlayer = { name: newPlayer.name }; 
       }
       
       if (!res.ok) {
-        throw new Error(savedPlayer.error || 'Erro ao adicionar atleta');
+        throw new Error(savedPlayer.error || savedPlayer.message || 'Erro ao adicionar atleta');
       }
       
       console.log('[DEBUG] Player saved:', savedPlayer);
@@ -768,7 +768,7 @@ export default function App() {
     if (!editingPlayer) return;
     setLoading(true);
     try {
-      await fetch(`/api/players/${editingPlayer.id}`, {
+      const res = await fetch(`/api/players/${editingPlayer.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -778,9 +778,18 @@ export default function App() {
           age: editingPlayer.age
         }),
       });
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || errorData.message || 'Erro ao atualizar atleta');
+      }
+
       toast.success('Atleta atualizado');
       setIsEditPlayerOpen(false);
       fetchPlayers();
+    } catch (e: any) {
+      console.error('[ERRO] Falha na edição:', e);
+      toast.error(e.message || 'Erro ao atualizar atleta');
     } finally {
       setLoading(false);
     }
