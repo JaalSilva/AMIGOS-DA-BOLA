@@ -420,7 +420,7 @@ async function startServer() {
     "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago", 
     "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto", 
     "Tico", "Meco", "Lula", "Bolsonaro", "Ciro", "Moro", "Jaaziel Silva", 
-    "Jean", "Carlos Alberto", "Geniselmo"
+    "Jean", "Carlos Alberto", "Geniselmo", "Thiago Gonzaga", "Matias"
   ];
 
   const seedAthletes = async () => {
@@ -438,11 +438,12 @@ async function startServer() {
         try {
           insertStmt.run(id, name, '00000000000', 'Amigos da Bola', '0', 'PENDENTE', now);
           count++;
+          console.log(`[SEEDER] Inserted athlete: ${name}`);
           if (firestore && isFirestoreAccessible) {
             firestore.collection('players').doc(id).set({
               id, name, phone: '00000000000', congregation: 'Amigos da Bola', age: '0', 
               status_payment: 'PENDENTE', updated_at: now, created_at: now
-            }).catch(() => {});
+            }).catch((e: any) => console.error(`[SEEDER] Firestore error for ${name}:`, e.message));
           }
         } catch (e: any) {
           console.error(`[SEEDER] Error inserting ${name}:`, e.message);
@@ -450,6 +451,7 @@ async function startServer() {
       }
     }
     if (count > 0) console.log(`[SEEDER] Added ${count} new athletes.`);
+    else console.log("[SEEDER] All athletes already exist.");
     return count;
   };
   
@@ -648,13 +650,21 @@ async function startServer() {
     if (action === 'START') {
       update.is_running = 1;
       update.start_time = new Date().toISOString();
-      if (duration) update.duration_remaining = duration;
+      if (duration) {
+        update.duration_remaining = duration;
+      } else if (!currentSession.duration_remaining || currentSession.duration_remaining <= 0) {
+        update.duration_remaining = 600;
+      }
     } else if (action === 'PAUSE') {
-      const elapsed = Math.floor((new Date().getTime() - new Date(currentSession.start_time).getTime()) / 1000);
+      let elapsed = 0;
+      if (currentSession.start_time) {
+        elapsed = Math.floor((new Date().getTime() - new Date(currentSession.start_time).getTime()) / 1000);
+      }
       const remaining = Math.max(0, currentSession.duration_remaining - elapsed);
       update.is_running = 0;
       update.duration_remaining = remaining;
       update.total_elapsed_seconds = (currentSession.total_elapsed_seconds || 0) + elapsed;
+      update.start_time = null; // Important to avoid double-counting if paused again
     } else if (action === 'RESET') {
       update.is_running = 0;
       update.duration_remaining = duration || 600;

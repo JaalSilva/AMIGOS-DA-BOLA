@@ -1307,7 +1307,7 @@ export default function App() {
                       </Button>
                     ) : (
                       <Button onClick={() => {
-                        if (displaySeconds === 600 && matchesToday === 0) {
+                        if (displaySeconds === 600 && matchesToday === 0 && (!matchSession.team_a || matchSession.team_a.length === 0)) {
                            setIsFirstMatchPromptOpen(true);
                         } else if (displaySeconds === 0 && !matchSession.is_extra_time) {
                            // Show extra time option maybe?
@@ -1423,7 +1423,7 @@ export default function App() {
                <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm">
                   <h2 className="text-2xl font-black uppercase italic tracking-tight">Escritório Amigos da Bola ⚽</h2>
                   <div className="flex gap-3 items-center flex-wrap justify-end">
-                    {players.length < 10 && (
+                    {players.length < 30 && (
                       <Button 
                         variant="default"
                         className="bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs shadow-lg animate-bounce"
@@ -1433,7 +1433,7 @@ export default function App() {
                             const res = await fetch('/api/admin/seed-athletes', { method: 'POST' });
                             const data = await res.json();
                             if (data.success) {
-                              toast.success(`Sucesso! ${data.added} atletas adicionados.`);
+                              toast.success(`Sucesso! ${data.added} atletas sincronizados.`);
                               await fetchPlayers();
                             } else {
                               throw new Error(data.error);
