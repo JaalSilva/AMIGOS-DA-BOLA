@@ -15,11 +15,12 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
+    function isOwner() {
+      return isSignedIn() && request.auth.token.email == 'jaazielss@gmail.com';
+    }
+
     function isAdmin() {
-      return isEmailVerified() && (
-        request.auth.token.email == 'jaazielss@gmail.com' ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-      );
+      return isOwner() || (isEmailVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
     }
 
     function isValidId(id) {
@@ -41,7 +42,7 @@ service cloud.firestore {
       function isValidPlayer(data) {
         return data.id is string && data.name is string && data.name.size() <= 100 &&
                data.phone is string && data.phone.size() <= 20 &&
-               (data.age == null || data.age is int) &&
+               (data.age == null || data.age is int || data.age is string) &&
                data.status_payment in ['PAGO', 'PENDENTE'];
       }
       allow read: if isSignedIn();

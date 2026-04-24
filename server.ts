@@ -432,26 +432,38 @@ async function startServer() {
     let count = 0;
     for (const name of athletes) {
       const exists = checkStmt.get(name);
+      let id: string;
+      const now = new Date().toISOString();
+      
       if (!exists) {
-        const id = uuidv4();
-        const now = new Date().toISOString();
+        id = uuidv4();
         try {
           insertStmt.run(id, name, '00000000000', 'Amigos da Bola', '0', 'PENDENTE', now);
           count++;
-          console.log(`[SEEDER] Inserted athlete: ${name}`);
-          if (firestore && isFirestoreAccessible) {
+          console.log(`[SEEDER] Inserted athlete locally: ${name}`);
+        } catch (e: any) {
+          console.error(`[SEEDER] Error inserting ${name} locally:`, e.message);
+          continue;
+        }
+      } else {
+        id = (exists as any).id;
+      }
+
+      // Always try to sync to Firestore if we are in this loop and it's missing there
+      if (firestore && isFirestoreAccessible) {
+        firestore.collection('players').doc(id).get().then((doc: any) => {
+          if (!doc.exists) {
             firestore.collection('players').doc(id).set({
               id, name, phone: '00000000000', congregation: 'Amigos da Bola', age: '0', 
               status_payment: 'PENDENTE', updated_at: now, created_at: now
-            }).catch((e: any) => console.error(`[SEEDER] Firestore error for ${name}:`, e.message));
+            }).then(() => console.log(`[SEEDER] Synced to Cloud: ${name}`))
+              .catch((e: any) => console.error(`[SEEDER] Firestore sync failed for ${name}:`, e.message));
           }
-        } catch (e: any) {
-          console.error(`[SEEDER] Error inserting ${name}:`, e.message);
-        }
+        }).catch(() => {});
       }
     }
     if (count > 0) console.log(`[SEEDER] Added ${count} new athletes.`);
-    else console.log("[SEEDER] All athletes already exist.");
+    else console.log("[SEEDER] All athletes checked.");
     return count;
   };
   
@@ -618,10 +630,16 @@ async function startServer() {
       }
     };
 
-    if (!firestore) return res.json(fallbackSession());
+    if (!firestore || !isFirestoreAccessible) return res.json(fallbackSession());
     try {
       const sessionDoc = await firestore.collection('match_session').doc('current_match').get();
-      const session = sessionDoc.exists ? sessionDoc.data() as any : fallbackSession();
+      const local = fallbackSession();
+      let session = sessionDoc.exists ? sessionDoc.data() as any : local;
+      
+      // If Firestore is NOT running but local IS, local wins (container is more up to date)
+      if (local.is_running && !session.is_running) {
+        session = local;
+      }
       
       if (session.is_running) {
         const elapsed = Math.floor((new Date().getTime() - new Date(session.start_time).getTime()) / 1000);
@@ -725,16 +743,16 @@ async function startServer() {
       console.error("SQLite timer update failed:", e.message);
     }
 
-    // Firestore
-    if (firestore) {
-      try {
-        await firestore.collection('match_session').doc('current_match').set(finalSession, { merge: true });
-      } catch (e: any) {
-        console.error("Firestore timer sync failed:", e.message);
-      }
+    // Firestore (NON-BLOCKING to ensure local reactivity)
+    if (firestore && isFirestoreAccessible) {
+      firestore.collection('match_session').doc('current_match').set(finalSession, { merge: true }).catch((e: any) => {
+        console.error("⚠️ [SYNC] Firestore timer sync failed:", e.message);
+        if (e.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
+      });
     }
 
     notifyUpdate('TIMER_CONTROL', finalSession);
+    console.log(`[TIMER] ${action} executed. Running: ${finalSession.is_running}, Rem: ${finalSession.duration_remaining}`);
     res.json(finalSession);
   });
 
@@ -966,19 +984,19 @@ async function startServer() {
     if (!firestore || !isFirestoreAccessible) return res.json(fallbackPlayers());
     try {
       const playersSnap = await firestore.collection('players').orderBy('name', 'asc').get();
-      let players = playersSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const cloudPlayers = playersSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const localPlayers = fallbackPlayers();
       
-      // Critical Fallback: If Firestore is empty but SQLite is NOT, use SQLite and try to sync
-      if (players.length === 0) {
-        const localPlayers = fallbackPlayers();
-        if (localPlayers.length > 0) {
-          console.log("[SYNC] Firestore is empty but local has data. Falling back to local.");
-          players = localPlayers;
-          // Optionally trigger background sync here
-        }
+      // Merge: Local players that are not in Cloud yet
+      const cloudIds = new Set(cloudPlayers.map((p: any) => p.id));
+      const unsyncedPlayers = localPlayers.filter((p: any) => !cloudIds.has(p.id));
+      
+      if (unsyncedPlayers.length > 0) {
+        console.log(`[SYNC] Found ${unsyncedPlayers.length} unsynced local athletes. Merging display.`);
       }
       
-      res.json(players);
+      const merged = [...cloudPlayers, ...unsyncedPlayers].sort((a, b) => a.name.localeCompare(b.name));
+      res.json(merged);
     } catch (e: any) {
       if (!e.message.includes('PERMISSION_DENIED')) {
         console.error("Players fetch failed, falling back to SQLite:", e.message);
@@ -1029,6 +1047,7 @@ async function startServer() {
     addSystemLog('CREATE', 'PLAYER', id, `Added player: ${name}`).catch(() => {});
     
     notifyUpdate('PLAYERS');
+    console.log(`[SUCCESS] Player ${name} processed. Returning result.`);
     return res.json(playerData);
   });
 
