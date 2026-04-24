@@ -197,6 +197,18 @@ const translations = {
   }
 };
 
+// --- Constants ---
+const DEFAULT_ATHLETES = [
+  "Jaal Silva", "Eduardo Santos", "Leandro SPTO", "Ruan Luz", "Ed Willian", 
+  "Alexandre BIgode", "André", "Ben-Hur", "Bira", "Caio", "César", 
+  "Danilo", "Domingos", "Elias", "Fagner", "Flavio", "Isaac", "Islan", 
+  "Jasdon", "Jonata", "Jonathan", "Josemiro", "Leandro Cortes", "Lourival", 
+  "Mateus", "Mauricio", "Miguel", "Ruan Nicolas", "Samuel", "Thiago", 
+  "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago",
+  "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto",
+  "Tico", "Jean", "Carlos Alberto", "Gustavo", "Geniselmo", "Moro"
+];
+
 // --- Main Component ---
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'partida' | 'jogadores' | 'financeiro' | 'fairplay' | 'estatisticas'>('dashboard');
@@ -216,7 +228,8 @@ export default function App() {
     resenha_balance: '0',
     language: 'pt' as 'pt' | 'en',
     spreadsheet_id: '',
-    google_client_id: ''
+    google_client_id: '',
+    make_webhook_url: ''
   });
   
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
@@ -685,10 +698,10 @@ export default function App() {
 
   const handleAddPlayer = async () => {
     if (!newPlayer.name) return toast.error('O nome é obrigatório');
-    // Força telefone neutro se não informado para evitar erro de validação do server
-    const phoneToSubmit = newPlayer.phone || '00000000000'; 
     
     setLoading(true);
+    console.log('[DEBUG] Attempting to hire:', newPlayer);
+    
     try {
       const ageNum = newPlayer.age ? parseInt(newPlayer.age) : null;
       const res = await fetch('/api/players', {
@@ -696,14 +709,46 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...newPlayer,
-          phone: phoneToSubmit,
           age: isNaN(ageNum as number) ? null : ageNum
         }),
       });
       
-      if (!res.ok) {
-        const error = await res.json();
-        throw new Error(error.error || 'Erro ao adicionar atleta');
+      let savedPlayer;
+      const textResponse = await res.text();
+      
+      try {
+        savedPlayer = JSON.parse(textResponse);
+      } catch (e) {
+        console.warn('[WARN] Resposta não é JSON, assumindo sucesso:', textResponse);
+        if (!res.ok && textResponse.toLowerCase().includes('error')) {
+           throw new Error(textResponse);
+        }
+        savedPlayer = { name: newPlayer.name }; 
+      }
+      
+      if (!res.ok && !savedPlayer.success) {
+        throw new Error(savedPlayer.error || 'Erro ao adicionar atleta');
+      }
+      
+      console.log('[DEBUG] Player saved:', savedPlayer);
+      
+      // --- Trigger Make Webhook if configured ---
+      if (settings.make_webhook_url) {
+        console.log('[DEBUG] Triggering Make Webhook...');
+        try {
+          fetch(settings.make_webhook_url, {
+            method: 'POST',
+            mode: 'no-cors', // Many webhooks don't return CORS headers
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              event: 'NEW_PLAYER',
+              athlete: savedPlayer,
+              timestamp: new Date().toISOString()
+            })
+          }).catch(err => console.warn('[WARN] Webhook trigger non-critical error:', err));
+        } catch (webhookErr) {
+          console.warn('[WARN] Webhook failed:', webhookErr);
+        }
       }
       
       toast.success('Atleta adicionado com sucesso');
@@ -711,6 +756,7 @@ export default function App() {
       setNewPlayer({ name: '', phone: '', congregation: '', age: '' });
       fetchPlayers();
     } catch (e: any) {
+      console.error('[ERRO] Falha na contratação:', e);
       toast.error(e.message);
     } finally {
       setLoading(false);
@@ -1352,7 +1398,37 @@ export default function App() {
             <motion.div key="jogadores" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
                <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm">
                   <h2 className="text-2xl font-black uppercase italic tracking-tight">Escritório Amigos da Bola ⚽</h2>
-                  <div className="flex gap-3 items-center">
+                  <div className="flex gap-3 items-center flex-wrap justify-end">
+                    <Button 
+                      variant="outline"
+                      className="border-2 border-zinc-200 text-zinc-500 hover:text-orange-600 hover:border-orange-600 rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs transition-all"
+                      onClick={async () => {
+                        if(confirm('Deseja cadastrar automaticamente os 50 atletas padrão do código?')) {
+                          setLoading(true);
+                          try {
+                            for(const name of DEFAULT_ATHLETES) {
+                              if(!players.find(p => p.name === name)) {
+                                await fetch('/api/players', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ name, phone: '', congregation: 'Amigos da Bola', age: '0' }),
+                                });
+                              }
+                            }
+                            const pRes = await fetch('/api/players');
+                            const pData = await pRes.json();
+                            setPlayers(pData);
+                            toast.success('Elenco importado com sucesso');
+                          } catch (e) {
+                            toast.error('Erro na importação');
+                          } finally {
+                            setLoading(false);
+                          }
+                        }
+                      }}
+                    >
+                      <Users size={16} /> Importar Elenco do Código
+                    </Button>
                     <Button 
                       variant="outline" 
                       className="border-2 border-emerald-100 text-emerald-600 rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs hover:bg-emerald-50"
@@ -1850,7 +1926,25 @@ export default function App() {
                    </Button>
                 </div>
 
-                <h4 className="text-xs font-black uppercase italic border-l-2 border-orange-500 pl-2">Zona de Perigo</h4>
+              <div className="pt-4 space-y-4">
+                 <h4 className="text-xs font-black uppercase italic border-l-2 border-purple-500 pl-2">Integração Automação (Make / Webhooks)</h4>
+                 <div className="bg-purple-50 p-6 rounded-2xl space-y-4">
+                    <div className="space-y-1">
+                       <Label className="text-[9px] font-black uppercase opacity-60">URL do Webhook (Make.com)</Label>
+                       <Input 
+                          placeholder="https://hook.make.com/..." 
+                          value={settings.make_webhook_url || ''} 
+                          onChange={e => setSettings({...settings, make_webhook_url: e.target.value})} 
+                          className="h-12 rounded-xl bg-white border-purple-100 font-mono text-xs"
+                       />
+                       <p className="text-[8px] font-bold text-purple-700 leading-tight mt-1">
+                         * O sistema enviará os dados do atleta para esta URL após cada contratação.
+                       </p>
+                    </div>
+                 </div>
+              </div>
+
+              <h4 className="text-xs font-black uppercase italic border-l-2 border-orange-500 pl-2">Zona de Perigo</h4>
                 <div className="flex flex-col gap-2">
                                        <p className="text-[10px] text-zinc-500 uppercase font-medium">Backup e Nuvem:</p>
                     <div className="flex flex-col gap-2 mb-4">
@@ -1961,7 +2055,16 @@ export default function App() {
           <div className="py-6 space-y-6">
             <div className="flex flex-col gap-2">
               <div className="flex flex-col gap-2 bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
-                <Label className="text-[10px] font-black uppercase text-zinc-400 italic">Lista de Nomes / Atleta Avulso</Label>
+                <div className="flex justify-between items-center mb-1">
+                  <Label className="text-[10px] font-black uppercase text-zinc-400 italic">Lista de Nomes / Atleta Avulso</Label>
+                  <Button 
+                    variant="ghost" 
+                    className="h-6 text-[9px] font-black uppercase text-orange-600 hover:text-orange-700 p-0"
+                    onClick={() => setManualName(DEFAULT_ATHLETES.join(', '))}
+                  >
+                    Preencher Automático
+                  </Button>
+                </div>
                 <textarea 
                   placeholder="Atleta Avulso 1, Atleta Avulso 2... (Cole sua lista aqui)" 
                   value={manualName} 

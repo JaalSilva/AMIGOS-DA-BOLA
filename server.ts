@@ -403,7 +403,8 @@ async function startServer() {
         ['resenha_balance', '0'],
         ['language', 'pt'],
         ['spreadsheet_id', ''],
-        ['google_client_id', '']
+        ['google_client_id', ''],
+        ['make_webhook_url', '']
       ];
       const insertSetting = db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)');
       defaults.forEach(([k, v]) => insertSetting.run(k, v));
