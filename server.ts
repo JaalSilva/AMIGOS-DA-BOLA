@@ -425,7 +425,9 @@ async function startServer() {
       "Danilo", "Domingos", "Elias", "Fagner", "Flavio", "Isaac", "Islan", 
       "Jasdon", "Jonata", "Jonathan", "Josemiro", "Leandro Cortes", "Lourival", 
       "Mateus", "Mauricio", "Miguel", "Ruan Nicolas", "Samuel", "Thiago", 
-      "Vitor", "Willian", "David Amaral", "Marcio", "Max"
+      "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago",
+      "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto",
+      "Tico", "Jean", "Carlos Alberto", "Gustavo", "Geniselmo", "Moro"
     ];
     
     console.log("[SEEDER] Checking for missing athletes...");
@@ -955,12 +957,13 @@ async function startServer() {
 
   app.post('/api/players', async (req, res) => {
     const { name, phone, congregation, age } = req.body;
-    if (!name || !phone) return res.status(400).json({ error: 'Nome e telefone são obrigatórios' });
+    if (!name) return res.status(400).json({ error: 'O nome é obrigatório' });
+    const finalPhone = phone || '00000000000';
     const id = uuidv4();
     const playerData = { 
       id, 
       name, 
-      phone, 
+      phone: finalPhone, 
       congregation: congregation || null, 
       age: age || null, 
       status_payment: 'PENDENTE',
@@ -971,7 +974,7 @@ async function startServer() {
     // Always persist to SQLite
     try {
       db.prepare('INSERT INTO players (id, name, phone, congregation, age, status_payment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(id, name, phone, playerData.congregation, playerData.age, playerData.status_payment, playerData.created_at, playerData.updated_at);
+        .run(id, name, finalPhone, playerData.congregation, playerData.age, playerData.status_payment, playerData.created_at, playerData.updated_at);
     } catch (e: any) {
       console.error("SQLite player insert failed:", e.message);
     }
