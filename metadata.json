@@ -1,6 +1,6 @@
 {
-  "name": "Baba Finance & Billing",
-  "description": "Sistema de gestão financeira e cobrança automatizada com persistência garantida via Firebase Firestore e sistema de backup/restauração.",
+  "name": "Amigos da Bola ⚽",
+  "description": "Sistema profissional de gestão financeira e estatísticas para grupos de futebol. Inclui cobrança automatizada, fair play, ranking e integração com nuvem.",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }

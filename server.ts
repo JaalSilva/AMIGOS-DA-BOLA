@@ -46,8 +46,12 @@ async function startServer() {
   process.on('uncaughtException', (err) => {
     console.error('[FATAL] Uncaught Exception:', err);
   });
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('[FATAL] Unhandled Rejection at:', promise, 'reason:', reason);
+  process.on('unhandledRejection', (reason: any, promise) => {
+    if (reason?.message?.includes('PERMISSION_DENIED')) {
+      console.warn('⚠️ [STABLE] Firestore Permission Denied (Handled):', reason.message);
+    } else {
+      console.error('[FATAL] Unhandled Rejection at:', promise, 'reason:', reason);
+    }
   });
 
   app.use(express.json());
@@ -71,14 +75,19 @@ async function startServer() {
 
   // Initialize Firebase Admin
   try {
+    const adminConfig: any = {
+      projectId: firebaseConfig.projectId
+    };
+
     if (!admin.apps.length) {
-      console.log("[BOOT] Initializing Firebase Admin...");
-      // In Cloud Run / AI Studio, ADC should handle authentication
-      // We explicitly pass the projectId from config if available
-      admin.initializeApp({
-        projectId: firebaseConfig.projectId
-      });
-      console.log(`[BOOT] Firebase Admin initialized (Project: ${admin.app().options.projectId}).`);
+      console.log("[BOOT] Initializing Firebase Admin with Project ID:", firebaseConfig.projectId);
+      admin.initializeApp(adminConfig);
+    } else {
+      console.log("[BOOT] Firebase Admin already initialized. Project:", admin.app().options.projectId);
+      // If the already initialized project differs, it might cause PERMISSION_DENIED
+      if (admin.app().options.projectId !== firebaseConfig.projectId && firebaseConfig.projectId) {
+        console.warn(`[BOOT] Project ID mismatch! Config: ${firebaseConfig.projectId}, Environment: ${admin.app().options.projectId}`);
+      }
     }
   } catch (e) {
     console.error("[BOOT] Firebase Admin initialization failed:", e);
@@ -86,34 +95,42 @@ async function startServer() {
 
   // Define Firestore instance with guard
   let firestore: any;
+  let isFirestoreAccessible = false;
   try {
     if (admin.apps.length > 0) {
       const dbId = firebaseConfig.firestoreDatabaseId;
       console.log(`[BOOT] Connecting to Firestore (Database: ${dbId || '(default)'})...`);
       
       try {
+        // Force the use of the specific project and database from config
         const potentialFirestore = dbId 
           ? getFirestore(admin.app(), dbId)
           : getFirestore(admin.app());
         
         // Connectivity check - attempt a small read
         console.log("[BOOT] Testing Firestore connectivity...");
-        await potentialFirestore.collection('app_settings').limit(1).get();
-        
-        firestore = potentialFirestore;
-        console.log("✅ [BOOT] Firestore connected and accessible.");
+        try {
+          await potentialFirestore.collection('app_settings').limit(1).get();
+          firestore = potentialFirestore;
+          isFirestoreAccessible = true;
+          console.log("✅ [BOOT] Firestore connected and accessible.");
+        } catch (readErr: any) {
+          if (readErr.message.includes('PERMISSION_DENIED')) {
+            console.warn("⚠️ [BOOT] Firestore found but lacks read permissions (Setup likely incomplete/declined). Cloud sync will be disabled.");
+            firestore = null; // Don't use it if we can't read settings
+            isFirestoreAccessible = false;
+          } else {
+            throw readErr;
+          }
+        }
       } catch (e: any) {
-        // We keep the instance potentialFirestore if it was created, but we don't set firestore global yet
-        // OR we set it and let the routes handle the PERMISSION_DENIED.
-        // Actually, let's keep it so routes can try again.
-        firestore = dbId 
-          ? getFirestore(admin.app(), dbId)
-          : getFirestore(admin.app());
-
         if (e.message.includes('PERMISSION_DENIED')) {
-          console.warn("⚠️ [BOOT] Firestore PERMISSION_DENIED detected. Cloud synchronization will be retried during operations.");
+          console.error("❌ [BOOT] Firestore PERMISSION_DENIED: The service account lacks permissions for this database instance.");
+          firestore = null;
+          isFirestoreAccessible = false;
         } else {
           console.error("❌ [BOOT] Firestore connection error:", e.message);
+          firestore = null;
         }
       }
     } else {
@@ -137,6 +154,20 @@ async function startServer() {
     console.log("[BOOT] Falling back to in-memory database...");
     db = new Database(':memory:');
   }
+
+  // Pre-parse SQLite JSON fields if getting match_session
+  const parseSessionFromSQLite = (row: any) => {
+    if (!row) return row;
+    const session = { ...row };
+    if (typeof session.team_a === 'string') {
+      try { session.team_a = JSON.parse(session.team_a); } catch (e) {}
+    }
+    if (typeof session.team_b === 'string') {
+      try { session.team_b = JSON.parse(session.team_b); } catch (e) {}
+    }
+    session.is_extra_time = !!session.is_extra_time;
+    return session;
+  };
   
   // Helper to notify all clients
   const notifyUpdate = (type: string, data?: any) => {
@@ -176,10 +207,16 @@ async function startServer() {
 
   // Silent Migration Logic
   const migrateToFirestore = async () => {
-    if (!firestore) return;
+    if (!firestore || !isFirestoreAccessible) return;
     try {
       console.log("[MIGRATION] Checking Firestore data...");
-      const playersCheck = await firestore.collection('players').limit(1).get().catch(() => ({ empty: true }));
+      const playersCheck = await firestore.collection('players').limit(1).get().catch((err: any) => {
+        if (err.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
+        return { empty: true };
+      });
+      if (!isFirestoreAccessible) return;
+      
+      const firestorePlayersCount = playersCheck.empty ? 0 : 1; 
       if (playersCheck.empty) {
         console.log("[MIGRATION] Firestore is empty. Starting silent migration from SQLite...");
         const tables = ['players', 'senders', 'attendance', 'fair_play', 'matches', 'app_settings', 'match_session', 'billing_logs'];
@@ -211,12 +248,20 @@ async function startServer() {
 
   // Restore FROM Firestore (for ephemeral persistence)
   const restoreFromFirestore = async () => {
-    if (!firestore) return;
+    if (!firestore || !isFirestoreAccessible) return;
     try {
       console.log("[RESTORE] Checking if local DB needs restoration from Firestore...");
       const playersCount = db.prepare('SELECT count(*) as count FROM players').get().count;
+      console.log(`[RESTORE] Current local athletes: ${playersCount}`);
+      
       if (playersCount <= 40) {
-        const firestorePlayers = await firestore.collection('players').get();
+        const firestorePlayers = await firestore.collection('players').get().catch((err: any) => {
+          if (err.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
+          throw err;
+        });
+        
+        if (!isFirestoreAccessible) return;
+        
         if (!firestorePlayers.empty) {
           console.log(`[RESTORE] Found ${firestorePlayers.size} records in Firestore. Restoring local cache...`);
           const tables = ['players', 'matches', 'fair_play', 'attendance', 'app_settings', 'match_session'];
@@ -231,13 +276,20 @@ async function startServer() {
                   const rowId = cleanedRow.id || cleanedRow.key;
                   delete cleanedRow.id;
                   
+                  // Convert objects/arrays to JSON for SQLite compatibility
+                  Object.keys(cleanedRow).forEach(key => {
+                    if (cleanedRow[key] !== null && typeof cleanedRow[key] === 'object' && !(cleanedRow[key] instanceof Date)) {
+                      cleanedRow[key] = JSON.stringify(cleanedRow[key]);
+                    }
+                  });
+
                   const keys = Object.keys(cleanedRow);
                   const values = Object.values(cleanedRow);
                   const placeholders = keys.map(() => '?').join(', ');
                   const setClause = keys.map(k => `${k} = EXCLUDED.${k}`).join(', ');
                   
                   if (table === 'app_settings') {
-                    db.prepare(`INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`).run(row.key, row.value);
+                    db.prepare(`INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`).run(rowId, row.value);
                   } else {
                     db.prepare(`INSERT INTO ${table} (id, ${keys.join(', ')}) VALUES (?, ${placeholders}) ON CONFLICT(id) DO UPDATE SET ${setClause}`).run(rowId, ...values);
                   }
@@ -247,8 +299,13 @@ async function startServer() {
           }
         }
       }
-    } catch (e) {
-      console.error("[RESTORE] Failed:", e);
+    } catch (e: any) {
+      if (e.message?.includes('PERMISSION_DENIED')) {
+        console.warn("[RESTORE] Permission denied to cloud data. Staying local-only.");
+        isFirestoreAccessible = false;
+      } else {
+        console.error("[RESTORE] Failed:", e);
+      }
     }
   };
 
@@ -299,6 +356,13 @@ async function startServer() {
       duration_remaining INTEGER DEFAULT 600,
       is_running INTEGER DEFAULT 0,
       start_time TEXT,
+      team_a TEXT,
+      team_b TEXT,
+      current_gk_index_a INTEGER DEFAULT 0,
+      current_gk_index_b INTEGER DEFAULT 0,
+      is_extra_time INTEGER DEFAULT 0,
+      matches_count_session INTEGER DEFAULT 0,
+      total_elapsed_seconds INTEGER DEFAULT 0,
       last_updated TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -323,12 +387,35 @@ async function startServer() {
       notes TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
-
-    CREATE TABLE IF NOT EXISTS app_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
   `);
+
+  try {
+    db.prepare('CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
+
+    // Seed default settings if empty
+    const settingsCheck = db.prepare('SELECT count(*) as count FROM app_settings').get() as { count: number };
+    if (settingsCheck.count === 0) {
+      console.log("[SEEDER] Initializing default app settings...");
+      const defaults = [
+        ['baba_name', 'Amigos da Bola ⚽'],
+        ['primary_color', '#FF5C00'],
+        ['secondary_color', '#1D1D1F'],
+        ['resenha_balance', '0'],
+        ['language', 'pt'],
+        ['spreadsheet_id', ''],
+        ['google_client_id', '']
+      ];
+      const insertSetting = db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?)');
+      defaults.forEach(([k, v]) => insertSetting.run(k, v));
+    }
+  } catch (e) {
+    console.error("[BOOT] Failed to initialize app_settings:", e);
+  }
+
+  // Ensure column exists for match_session
+  try { db.prepare("ALTER TABLE match_session ADD COLUMN matches_count_session INTEGER DEFAULT 0").run(); } catch(e) {}
+  try { db.prepare("ALTER TABLE match_session ADD COLUMN total_elapsed_seconds INTEGER DEFAULT 0").run(); } catch(e) {}
+  console.log("[BOOT] Migrated match_session: Added columns check");
 
   // Seeder for requested athletes
   const seedAthletes = () => {
@@ -381,7 +468,7 @@ async function startServer() {
 
   console.log("[BOOT] Initializing default settings...");
   const defaultSettings = [
-    { key: 'baba_name', value: 'Baba Elite' },
+    { key: 'baba_name', value: 'Amigos da Bola ⚽' },
     { key: 'primary_color', value: '#FF5C00' },
     { key: 'secondary_color', value: '#1D1D1F' },
     { key: 'resenha_balance', value: '0' }
@@ -407,6 +494,23 @@ async function startServer() {
     }
     if (!playerTableInfo.some(col => col.name === 'age')) {
       db.exec("ALTER TABLE players ADD COLUMN age INTEGER");
+    }
+
+    const sessionTableInfo = db.prepare("PRAGMA table_info(match_session)").all() as any[];
+    if (!sessionTableInfo.some(col => col.name === 'team_a')) {
+      db.exec("ALTER TABLE match_session ADD COLUMN team_a TEXT");
+    }
+    if (!sessionTableInfo.some(col => col.name === 'team_b')) {
+      db.exec("ALTER TABLE match_session ADD COLUMN team_b TEXT");
+    }
+    if (!sessionTableInfo.some(col => col.name === 'current_gk_index_a')) {
+      db.exec("ALTER TABLE match_session ADD COLUMN current_gk_index_a INTEGER DEFAULT 0");
+    }
+    if (!sessionTableInfo.some(col => col.name === 'current_gk_index_b')) {
+      db.exec("ALTER TABLE match_session ADD COLUMN current_gk_index_b INTEGER DEFAULT 0");
+    }
+    if (!sessionTableInfo.some(col => col.name === 'is_extra_time')) {
+      db.exec("ALTER TABLE match_session ADD COLUMN is_extra_time INTEGER DEFAULT 0");
     }
   } catch (e) {
     console.error("[BOOT] Migration error:", e);
@@ -483,8 +587,9 @@ async function startServer() {
   app.get('/api/match/timer', async (req, res) => {
     const fallbackSession = () => {
       try {
-        const session = db.prepare('SELECT * FROM match_session WHERE id = "current_match"').get();
+        let session = db.prepare('SELECT * FROM match_session WHERE id = "current_match"').get();
         if (session) {
+          session = parseSessionFromSQLite(session);
           if (session.is_running) {
             const elapsed = Math.floor((new Date().getTime() - new Date(session.start_time).getTime()) / 1000);
             const remaining = Math.max(0, session.duration_remaining - elapsed);
@@ -506,7 +611,8 @@ async function startServer() {
       if (session.is_running) {
         const elapsed = Math.floor((new Date().getTime() - new Date(session.start_time).getTime()) / 1000);
         const remaining = Math.max(0, session.duration_remaining - elapsed);
-        return res.json({ ...session, duration_remaining: remaining });
+        const total_elapsed = (session.total_elapsed_seconds || 0) + elapsed;
+        return res.json({ ...session, duration_remaining: remaining, total_elapsed_seconds: total_elapsed });
       }
       res.json(session);
     } catch (e: any) {
@@ -520,7 +626,8 @@ async function startServer() {
     
     // Get current state
     try {
-      currentSession = db.prepare('SELECT * FROM match_session WHERE id = "current_match"').get() || currentSession;
+      const row = db.prepare('SELECT * FROM match_session WHERE id = "current_match"').get();
+      if (row) currentSession = parseSessionFromSQLite(row);
     } catch (e) {}
 
     let update: any = { last_updated: new Date().toISOString() };
@@ -528,23 +635,47 @@ async function startServer() {
     if (action === 'START') {
       update.is_running = 1;
       update.start_time = new Date().toISOString();
+      if (duration) update.duration_remaining = duration;
     } else if (action === 'PAUSE') {
       const elapsed = Math.floor((new Date().getTime() - new Date(currentSession.start_time).getTime()) / 1000);
       const remaining = Math.max(0, currentSession.duration_remaining - elapsed);
       update.is_running = 0;
       update.duration_remaining = remaining;
+      update.total_elapsed_seconds = (currentSession.total_elapsed_seconds || 0) + elapsed;
     } else if (action === 'RESET') {
       update.is_running = 0;
-      update.duration_remaining = 600;
+      update.duration_remaining = duration || 600;
+      update.total_elapsed_seconds = 0;
       update.team_a = null;
       update.team_b = null;
       update.is_extra_time = false;
       update.current_gk_index_a = 0;
       update.current_gk_index_b = 0;
+      update.matches_count_session = 0;
+    } else if (action === 'INCREMENT_MATCH_COUNT') {
+      update.matches_count_session = (currentSession.matches_count_session || 0) + 1;
+      
+      // Auto-record a "match part" in the matches table to increment the counter
+      const matchId = uuidv4();
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const nowStr = new Date().toISOString();
+      try {
+        db.prepare('INSERT INTO matches (id, date, team_a_score, team_b_score, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(matchId, dateStr, 0, 0, `Auto: Partida ${update.matches_count_session}`, nowStr);
+        
+        if (firestore) {
+          firestore.collection('matches').doc(matchId).set({
+            id: matchId, date: dateStr, team_a_score: 0, team_b_score: 0, 
+            notes: `Auto: Partida ${update.matches_count_session}`, created_at: nowStr
+          }).catch(() => {});
+        }
+        notifyUpdate('MATCHES');
+      } catch (e) {}
     } else if (action === 'EXTRA') {
       update.is_running = 1;
       update.start_time = new Date().toISOString();
-      update.duration_remaining = 120; // 2 minutes
+      const extraSecs = duration || 120;
+      update.duration_remaining = (currentSession.duration_remaining || 0) + extraSecs;
       update.is_extra_time = true;
     } else if (action === 'UPDATE') {
       update.duration_remaining = duration;
@@ -556,8 +687,14 @@ async function startServer() {
 
     // SQLite
     try {
-      const keys = Object.keys(finalSession);
-      const values = Object.values(finalSession);
+      const sqliteSession = { ...finalSession };
+      // Convert arrays/objects to JSON for SQLite
+      if (sqliteSession.team_a) sqliteSession.team_a = JSON.stringify(sqliteSession.team_a);
+      if (sqliteSession.team_b) sqliteSession.team_b = JSON.stringify(sqliteSession.team_b);
+      if (sqliteSession.is_extra_time !== undefined) sqliteSession.is_extra_time = sqliteSession.is_extra_time ? 1 : 0;
+
+      const keys = Object.keys(sqliteSession);
+      const values = Object.values(sqliteSession);
       const placeholders = keys.map(() => '?').join(', ');
       const setClause = keys.map(k => `${k} = EXCLUDED.${k}`).join(', ');
       db.prepare(`INSERT INTO match_session (${keys.join(', ')}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${setClause}`).run(...values);
@@ -693,7 +830,7 @@ async function startServer() {
         const settingsObj: any = {};
         rows.forEach((r: any) => settingsObj[r.key] = r.value);
         if (Object.keys(settingsObj).length === 0) {
-           return { baba_name: 'Baba Elite', primary_color: '#FF5C00', secondary_color: '#1D1D1F', resenha_balance: '0' };
+           return { baba_name: 'Baba Elite', primary_color: '#FF5C00', secondary_color: '#1D1D1F', resenha_balance: '0', google_client_id: '' };
         }
         return settingsObj;
       } catch (e) {
@@ -777,7 +914,7 @@ async function startServer() {
     } catch (e) {}
 
     // Firestore Reset Check
-    if (firestore) {
+    if (firestore && isFirestoreAccessible) {
       try {
         const lastResetSnap = await firestore.collection('app_settings').doc('last_payment_reset').get();
         const lastReset = lastResetSnap.exists ? lastResetSnap.data()?.value : null;
@@ -795,13 +932,15 @@ async function startServer() {
         }
       } catch (e: any) {
         // Silently fail firestore reset if permissions are missing
-        if (!e.message.includes('PERMISSION_DENIED')) {
+        if (e.message.includes('PERMISSION_DENIED')) {
+          isFirestoreAccessible = false;
+        } else {
           console.error('Firestore payment reset check failed:', e.message);
         }
       }
     }
 
-    if (!firestore) return res.json(fallbackPlayers());
+    if (!firestore || !isFirestoreAccessible) return res.json(fallbackPlayers());
     try {
       const playersSnap = await firestore.collection('players').orderBy('name', 'asc').get();
       const players = playersSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
@@ -837,11 +976,13 @@ async function startServer() {
       console.error("SQLite player insert failed:", e.message);
     }
 
-    if (firestore) {
+    if (firestore && isFirestoreAccessible) {
       try {
         await firestore.collection('players').doc(id).set(playerData);
       } catch (e: any) {
-        if (!e.message.includes('PERMISSION_DENIED')) {
+        if (e.message.includes('PERMISSION_DENIED')) {
+          isFirestoreAccessible = false;
+        } else {
           console.error("Firestore player sync failed:", e.message);
         }
       }
@@ -896,11 +1037,15 @@ async function startServer() {
       console.error("SQLite player update failed:", e.message);
     }
 
-    if (firestore) {
+    if (firestore && isFirestoreAccessible) {
       try {
         await firestore.collection('players').doc(id).update(update);
       } catch (e: any) {
-        console.error("Firestore player update failed:", e.message);
+        if (e.message.includes('PERMISSION_DENIED')) {
+          isFirestoreAccessible = false;
+        } else {
+          console.error("Firestore player update failed:", e.message);
+        }
       }
     }
 
@@ -922,12 +1067,14 @@ async function startServer() {
             .run(fpId, id, score, reason, 'PAGAMENTO', fpDate);
         } catch (e) {}
 
-        if (firestore && score !== 0) {
+        if (firestore && isFirestoreAccessible && score !== 0) {
           try {
             await firestore.collection('fair_play').doc(fpId).set({
               id: fpId, player_id: id, score, reason, category: 'PAGAMENTO', created_at: fpDate
             });
-          } catch (e) {}
+          } catch (e: any) {
+            if (e.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
+          }
         }
       }
     } catch (e) {}
@@ -944,10 +1091,12 @@ async function startServer() {
       db.prepare('DELETE FROM players WHERE id = ?').run(id);
     } catch (e) {}
 
-    if (firestore) {
+    if (firestore && isFirestoreAccessible) {
       try {
         await firestore.collection('players').doc(id).delete();
-      } catch (e) {}
+      } catch (e: any) {
+        if (e.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
+      }
     }
     
     await addSystemLog('DELETE', 'PLAYER', id, 'Removed player from system');

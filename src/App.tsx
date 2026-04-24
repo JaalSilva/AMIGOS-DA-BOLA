@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 /**
  * BABA FINANCE & BILLING - FRONTEND CORE
  * Developed by: Jaal Silva
@@ -21,7 +22,7 @@ import {
   UserPlus, Send, RefreshCw, Trash2, CheckCircle2, AlertCircle, Phone, Database, 
   Smartphone, ShieldCheck, History, Settings, ExternalLink, Trophy, Users, Calendar, 
   Wallet, Star, Ghost, Award, FileSpreadsheet, Share2, Play, Pause, RotateCcw, Volume2, Timer,
-  Download, Upload, HardDrive, FileJson
+  Download, Upload, HardDrive, FileJson, Info, UserCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { jsPDF } from "jspdf";
@@ -75,6 +76,8 @@ interface MatchSession {
   current_gk_index_a?: number;
   current_gk_index_b?: number;
   is_extra_time?: boolean;
+  matches_count_session?: number;
+  total_elapsed_seconds?: number;
 }
 
 interface MatchRecord {
@@ -117,6 +120,8 @@ const translations = {
     registrarFalta: "Registrar Falta",
     acrescimo: "Acréscimo (+2min)",
     fimDeJogo: "Fim de Jogo!",
+    chegueiPrimeiro: "Cheguei Primeiro",
+    limparSorteio: "Limpar Seleção",
     configuracoes: "Configurações",
     idioma: "Idioma",
     salvar: "Salvar",
@@ -127,10 +132,10 @@ const translations = {
     emAndamento: "Em Andamento",
     aguardando: "Aguardando",
     jogosHoje: "Partidas Hoje",
-    escritorio: "Escritório do Baba",
+    escritorio: "Escritório Amigos da Bola ⚽",
     contratar: "Contratar Atleta",
     pagamento: "Financeiro",
-    saldo: "Saldo Resenha",
+    saldo: "Saldo Amigos da Bola ⚽",
     emAberto: "Em Aberto",
     rankingTemporada: "Destaques da Temporada",
     verRanking: "Ver Ranking Completo",
@@ -139,7 +144,7 @@ const translations = {
     amarelo: "Amarelo",
     azul: "Azul",
     vermelho: "Vermelho",
-    avisoDica: "O Fair Play vale mais que o gol no nosso baba. Mantenha os pagamentos em dia e a disciplina em campo para subir no ranking."
+    avisoDica: "O Fair Play vale mais que o gol no Amigos da Bola ⚽. Mantenha os pagamentos em dia e a disciplina em campo para subir no ranking."
   },
   en: {
     dashboard: "Dashboard",
@@ -164,6 +169,8 @@ const translations = {
     registrarFalta: "Register Foul",
     acrescimo: "Extra Time (+2min)",
     fimDeJogo: "Game Over!",
+    chegueiPrimeiro: "I'm Here First",
+    limparSorteio: "Clear Selection",
     configuracoes: "Settings",
     idioma: "Language",
     salvar: "Save",
@@ -174,10 +181,10 @@ const translations = {
     emAndamento: "In Progress",
     aguardando: "Waiting",
     jogosHoje: "Matches Today",
-    escritorio: "Baba Office",
+    escritorio: "Amigos da Bola ⚽ Office",
     contratar: "Hire Player",
     pagamento: "Financial",
-    saldo: "Resenha Balance",
+    saldo: "Amigos da Bola ⚽ Balance",
     emAberto: "Pending",
     rankingTemporada: "Season Highlights",
     verRanking: "View Full Ranking",
@@ -202,16 +209,109 @@ export default function App() {
   const [newPlayer, setNewPlayer] = useState({ name: '', phone: '', congregation: '', age: '' });
   const [selectedSender, setSelectedSender] = useState<string>('');
   const [settings, setSettings] = useState({
-    baba_name: 'Baba Elite',
+    baba_name: 'Amigos da Bola ⚽',
     primary_color: '#FF5C00',
     secondary_color: '#1D1D1F',
     sync_timer: false,
     resenha_balance: '0',
-    language: 'pt' as 'pt' | 'en'
+    language: 'pt' as 'pt' | 'en',
+    spreadsheet_id: '',
+    google_client_id: ''
   });
+  
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+
+  const handleSheetsSync = async () => {
+    if (!settings.spreadsheet_id) {
+      toast.error('Informe o ID da Planilha nas configurações');
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      console.log('--- DEBUG GOOGLE AUTH ---');
+      console.log('Client ID being used:', settings.google_client_id);
+      console.log('Spreadsheet ID:', settings.spreadsheet_id);
+      
+      if (!settings.google_client_id) {
+        toast.error('Informe o Client ID do Google Cloud no painel de Configurações');
+        setIsSettingsOpen(true);
+        setLoading(false);
+        return;
+      }
+
+      // @ts-ignore
+      const client = google.accounts.oauth2.initTokenClient({
+        client_id: settings.google_client_id,
+        scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+        callback: async (response: any) => {
+          if (response.access_token) {
+            setGoogleAccessToken(response.access_token);
+            try {
+              toast.loading('Sincronizando Sistema Completo com Google Sheets...', { id: 'sheets-sync' });
+              
+              // 1. Members Data
+              const membersData = players.map(p => [p.id, p.name, p.phone, p.congregation || '', p.age || '', p.status_payment, p.updated_at]);
+              membersData.unshift(['ID', 'NOME', 'WHATSAPP', 'CONGREGAÇÃO', 'IDADE', 'PAGAMENTO', 'ULTIMA ATUALIZAÇÃO']);
+
+              // 2. Attendance Data
+              const attData = attendanceLogs.map(a => [a.id, a.player_name, a.date, a.status]);
+              attData.unshift(['ID', 'JOGADOR', 'DATA', 'STATUS']);
+
+              // 3. Fair Play Ranking Data
+              const fpData = ranking.map(r => [r.id, r.name, r.score, r.foulCount, r.yellowCards, r.blueCards, r.redCards]);
+              fpData.unshift(['ID', 'NOME', 'SCORE TOTAL', 'FALTAS', 'AMARELO', 'AZUL', 'VERMELHO']);
+
+              // 4. Matches Data
+              const matchData = (monthlyStats?.matches || []).map(m => [m.id, m.date, m.team_a_score, m.team_b_score, m.notes]);
+              matchData.unshift(['ID', 'DATA', 'PLACAR A', 'PLACAR B', 'OBSERVAÇÕES']);
+
+              const syncTab = async (tabName: string, data: any[][]) => {
+                const range = `${tabName}!A1:Z${data.length + 10}`;
+                let res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${settings.spreadsheet_id}/values/${range}?valueInputOption=USER_ENTERED`, {
+                  method: 'PUT',
+                  headers: { Authorization: `Bearer ${response.access_token}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ values: data })
+                });
+
+                if (res.status === 404) {
+                   // Sheet might not exist, we'd need to create it, but for now we fallback to standard sync if it fails
+                   console.warn(`Tab ${tabName} not found or accessible.`);
+                }
+                return res;
+              };
+
+              await syncTab('Membros', membersData);
+              await syncTab('Presença', attData);
+              await syncTab('Ranking', fpData);
+              await syncTab('Partidas', matchData);
+
+              toast.success('Sistema Sincronizado com Sucesso!', { id: 'sheets-sync' });
+            } catch (e: any) {
+              console.error(e);
+              toast.error('Falha no sincronismo: ' + e.message, { id: 'sheets-sync' });
+            } finally {
+              setLoading(false);
+            }
+          } else {
+            setLoading(false);
+            toast.error('Falha na autenticação');
+          }
+        },
+      });
+      client.requestAccessToken();
+    } catch (e) {
+      console.error(e);
+      setLoading(false);
+      toast.error('Erro ao iniciar fluxo Google');
+    }
+  };
   
   // Match & Timer State
   const [matchSession, setMatchSession] = useState<MatchSession>({ duration_remaining: 600, is_running: 0, start_time: null, is_extra_time: false });
+  const matchSessionRef = useRef(matchSession);
+  useEffect(() => { matchSessionRef.current = matchSession; }, [matchSession]);
   const [displaySeconds, setDisplaySeconds] = useState(600);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -426,11 +526,16 @@ export default function App() {
             handleTimerFinish();
             return 0;
           }
-          return prev - 1;
+          
+          // Check for 5-minute mark increment
+          // matchSessionRef.current.duration_remaining is the value when START was clicked
+          // displaySeconds is the current countdown
+          const currentDuration = prev - 1;
+          return currentDuration;
         });
       }, 1000);
     }
-
+    
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -438,6 +543,22 @@ export default function App() {
       }
     };
   }, [matchSession.is_running, handleTimerFinish]);
+
+  // Handle Match Counting side-effect
+  useEffect(() => {
+    if (!matchSession.is_running) return;
+    
+    // Total played is what was already played in previous segments + what is played now
+    const currentRunElapsed = matchSession.duration_remaining - displaySeconds;
+    const totalPlayed = (matchSession.total_elapsed_seconds || 0) + currentRunElapsed;
+    
+    const expectedCount = Math.floor(totalPlayed / 300);
+    const currentCount = matchSession.matches_count_session || 0;
+    
+    if (expectedCount > currentCount && expectedCount > 0) {
+      handleTimerControl('INCREMENT_MATCH_COUNT');
+    }
+  }, [displaySeconds, matchSession.is_running, matchSession.duration_remaining, matchSession.matches_count_session, matchSession.total_elapsed_seconds]);
 
   const runDraft = () => {
     if (draftSelection.length !== 12) {
@@ -491,12 +612,11 @@ export default function App() {
     }, 1000);
   };
 
-  const handleTimerControl = async (action: 'START' | 'PAUSE' | 'RESET' | 'EXTRA') => {
+  const handleTimerControl = async (action: 'START' | 'PAUSE' | 'RESET' | 'EXTRA' | 'INCREMENT_MATCH_COUNT' | 'UPDATE', duration?: number) => {
     let body: any = { action };
+    if (duration) body.duration = duration;
     
     if (action === 'EXTRA') {
-      body.action = 'UPDATE_SESSION';
-      body.session = { ...matchSession, duration_remaining: 120, is_extra_time: true, is_running: 1, start_time: new Date().toISOString() };
       toast.success(t('acrescimo'));
     }
 
@@ -864,8 +984,8 @@ export default function App() {
           <div className="flex items-center gap-3">
             <Trophy className="text-white drop-shadow-md" size={32} />
             <div className="flex flex-col leading-none">
-              <h1 className="text-2xl font-black uppercase italic tracking-tighter text-white">{settings.baba_name}</h1>
-              <span className="text-[10px] font-bold tracking-[0.2em] opacity-80 uppercase text-white">Elite League</span>
+              <h1 className="text-2xl font-black uppercase italic tracking-tighter text-white">Amigos da Bola ⚽</h1>
+              <span className="text-[10px] font-bold tracking-[0.1em] opacity-80 uppercase text-white">Próximo Jogo</span>
             </div>
           </div>
           <div className="hidden md:flex flex-1 justify-center">
@@ -884,7 +1004,7 @@ export default function App() {
           </div>
           <div className="flex gap-2 items-center">
              <div className="hidden lg:flex flex-col items-end text-white">
-               <span className="text-[8px] font-bold opacity-70 uppercase text-white">Cofre do Baba</span>
+               <span className="text-[8px] font-bold opacity-70 uppercase text-white">Cofre Amigos da Bola ⚽</span>
                <span className="text-sm font-black italic text-white">R$ {players?.filter(p => p.status_payment === 'PAGO').length * 40}</span>
              </div>
              <button 
@@ -967,7 +1087,7 @@ export default function App() {
                       <div className="relative z-10 text-center space-y-4">
                          <Users size={48} className="mx-auto text-orange-500 opacity-50" />
                          <h3 className="text-2xl font-black uppercase italic">Jogadores em Campo</h3>
-                         <p className="text-zinc-400 text-xs uppercase font-bold tracking-widest max-w-sm mx-auto">Configure os times do baba semanal e acompanhe as estatísticas em tempo real.</p>
+                         <p className="text-zinc-400 text-xs uppercase font-bold tracking-widest max-w-sm mx-auto">Configure os times semanalmente e acompanhe as estatísticas em tempo real.</p>
                          <Button className="rounded-full uppercase font-black text-xs px-8 h-12 text-white" style={{ backgroundColor: settings.primary_color }} onClick={() => setActiveTab('partida')}>Iniciar Nova Partida</Button>
                       </div>
                    </div>
@@ -1001,7 +1121,7 @@ export default function App() {
                        </div>
                        <div className="pt-6 border-t border-zinc-100 space-y-4">
                           <div className="flex justify-between text-xs">
-                             <span className="font-bold text-zinc-400">AMICI DO BABA</span>
+                             <span className="font-bold text-zinc-400">AMICI DI BOLA</span>
                              <span className="font-black text-zinc-900">{players.length} ATLETAS</span>
                           </div>
                           <div className="flex justify-between text-xs">
@@ -1092,6 +1212,24 @@ export default function App() {
                     {formatTime(displaySeconds)}
                   </div>
 
+                  {!matchSession.is_running && (
+                    <div className="flex justify-center gap-2 mb-6">
+                      {[5, 10, 12, 15].map(m => (
+                        <Button 
+                          key={m} 
+                          variant={displaySeconds === m * 60 ? "default" : "outline"}
+                          className="h-10 px-4 rounded-xl font-bold"
+                          onClick={() => {
+                            setDisplaySeconds(m * 60);
+                            handleTimerControl('UPDATE', m * 60);
+                          }}
+                        >
+                          {m} Min
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap justify-center gap-6">
                     {matchSession.is_running ? (
                       <Button onClick={() => handleTimerControl('PAUSE')} className="h-28 w-28 rounded-full bg-orange-600 hover:bg-orange-700 shadow-xl scale-125">
@@ -1099,7 +1237,7 @@ export default function App() {
                       </Button>
                     ) : (
                       <Button onClick={() => {
-                        if (displaySeconds === 600) {
+                        if (displaySeconds === 600 && matchesToday === 0) {
                            setIsFirstMatchPromptOpen(true);
                         } else if (displaySeconds === 0 && !matchSession.is_extra_time) {
                            // Show extra time option maybe?
@@ -1116,16 +1254,26 @@ export default function App() {
                     </Button>
                   </div>
 
+                  {matchSession.is_running === 1 && (
+                    <div className="flex justify-center gap-3 mt-6">
+                      <Button variant="outline" size="sm" className="rounded-xl font-black uppercase text-[10px]" onClick={() => handleTimerControl('EXTRA', 60)}>+1 Min</Button>
+                      <Button variant="outline" size="sm" className="rounded-xl font-black uppercase text-[10px]" onClick={() => handleTimerControl('EXTRA', 120)}>+2 Min</Button>
+                    </div>
+                  )}
+
                   <div className="pt-12 grid grid-cols-2 gap-8 border-t border-zinc-100">
                     <div className="space-y-1">
                       <p className="text-[10px] font-black uppercase text-zinc-400">{t('jogosHoje')}</p>
                       <p className="text-2xl font-black italic">{matchesToday} {matchesToday === 1 ? 'Jogo' : 'Jogos'}</p>
                     </div>
                     <div className="space-y-1">
-                      <p className="text-[10px] font-black uppercase text-zinc-400">{t('statusCampinho')}</p>
-                      <Badge className={matchSession.is_running ? "bg-green-100 text-green-700 uppercase" : "bg-zinc-100 text-zinc-500 uppercase"}>
-                        {matchSession.is_running ? t('emAndamento') : t('aguardando')}
-                      </Badge>
+                      <p className="text-[10px] font-black uppercase text-zinc-400">Total Match Time</p>
+                      <p className="text-2xl font-black italic">
+                        {formatTime(
+                          (matchSession.total_elapsed_seconds || 0) + 
+                          (matchSession.is_running ? (matchSession.duration_remaining - displaySeconds) : 0)
+                        )}
+                      </p>
                     </div>
                   </div>
                </div>
@@ -1203,9 +1351,57 @@ export default function App() {
           {activeTab === 'jogadores' && (
             <motion.div key="jogadores" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
                <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm">
-                  <h2 className="text-2xl font-black uppercase italic tracking-tight">Escritório do Baba</h2>
-                  <Button onClick={() => setIsAddOpen(true)} className="bg-[#FF5C00] font-black uppercase italic rounded-xl px-6 h-12 shadow-lg hover:bg-orange-700">Contratar Atleta</Button>
+                  <h2 className="text-2xl font-black uppercase italic tracking-tight">Escritório Amigos da Bola ⚽</h2>
+                  <div className="flex gap-3 items-center">
+                    <Button 
+                      variant="outline" 
+                      className="border-2 border-emerald-100 text-emerald-600 rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs hover:bg-emerald-50"
+                      onClick={handleSheetsSync}
+                    >
+                      <FileSpreadsheet size={16} />
+                      Sync Sheets
+                    </Button>
+                    <Button onClick={() => setIsAddOpen(true)} className="bg-[#FF5C00] font-black uppercase italic rounded-xl px-6 h-12 shadow-lg hover:bg-orange-700">Contratar Atleta</Button>
+                  </div>
                </div>
+
+               <AnimatePresence>
+                 {draftSelection.length > 0 && (
+                   <motion.div 
+                     initial={{ opacity: 0, height: 0 }}
+                     animate={{ opacity: 1, height: 'auto' }}
+                     exit={{ opacity: 0, height: 0 }}
+                     className="bg-orange-50 border border-orange-100 rounded-2xl p-4 flex flex-col md:flex-row justify-between items-center gap-4 overflow-hidden shadow-sm"
+                   >
+                     <div className="flex items-center gap-3">
+                       <div className="bg-orange-600 text-white h-10 w-10 rounded-full flex items-center justify-center font-black italic shadow-inner">
+                         {draftSelection.length}
+                       </div>
+                       <div>
+                         <p className="text-[10px] font-black uppercase italic text-orange-900 leading-none">Jogadores Presentes</p>
+                         <p className="text-[9px] font-bold text-orange-700 uppercase tracking-widest">{draftSelection.length}/12 selecionados para o sorteio</p>
+                       </div>
+                     </div>
+                     <div className="flex gap-2">
+                       <Button 
+                         variant="ghost" 
+                         size="sm" 
+                         className="font-black uppercase italic text-[10px] text-orange-700 hover:bg-orange-100"
+                         onClick={() => setDraftSelection([])}
+                       >
+                         <Trash2 size={12} className="mr-1" /> {t('limparSorteio')}
+                       </Button>
+                       <Button 
+                         size="sm" 
+                         className="bg-orange-600 hover:bg-orange-700 text-white font-black uppercase italic text-[10px] rounded-xl px-6 h-10 shadow-md"
+                         onClick={() => setIsDraftOpen(true)}
+                       >
+                         {draftSelection.length === 12 ? 'Ir para Sorteio ⚽' : 'Ver Lista'}
+                       </Button>
+                     </div>
+                   </motion.div>
+                 )}
+               </AnimatePresence>
                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                  {players.map(p => (
                    <Card key={p.id} className="rounded-2xl border-none shadow-sm hover:shadow-xl hover:translate-y-[-4px] transition-all bg-white relative overflow-hidden group">
@@ -1234,6 +1430,25 @@ export default function App() {
                           <Button variant="secondary" size="sm" className="h-8 px-3 rounded-lg flex items-center gap-1 text-[9px] font-black uppercase italic bg-zinc-100" onClick={() => { setEditingPlayer(p); setIsEditPlayerOpen(true); }}>
                              <Settings size={12}/> EDITAR
                           </Button>
+                          <Button 
+                            variant={draftSelection.includes(p.name) ? "default" : "outline"}
+                            className={`h-10 px-3 rounded-xl flex items-center gap-2 transition-all ${draftSelection.includes(p.name) ? 'bg-orange-600 text-white border-none shadow-md' : 'text-zinc-400 border-zinc-200'}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (draftSelection.includes(p.name)) {
+                                setDraftSelection(draftSelection.filter(n => n !== p.name));
+                              } else if (draftSelection.length < 12) {
+                                setDraftSelection([...draftSelection, p.name]);
+                                toast.success(`${p.name} chegou! (${draftSelection.length + 1}/12)`);
+                              } else {
+                                toast.info("Limite de 12 jogadores atingido!");
+                              }
+                            }}
+                            title={t('chegueiPrimeiro')}
+                          >
+                            <UserCheck size={14}/>
+                            <span className="text-[9px] font-black uppercase italic tracking-tighter">Cheguei</span>
+                          </Button>
                           <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full text-red-100 hover:text-red-600 hover:bg-red-50" onClick={() => { if(confirm('Dispensa do elenco?')) fetch(`/api/players/${p.id}`, { method: 'DELETE' }).then(fetchPlayers) }}>
                              <Trash2 size={12}/>
                           </Button>
@@ -1250,7 +1465,7 @@ export default function App() {
                <div className="bg-[#1D1D1F] rounded-3xl p-12 text-white relative overflow-hidden">
                   <div className="relative z-10 space-y-6">
                     <Trophy className="text-orange-500" size={48} />
-                    <h2 className="text-4xl md:text-6xl font-black uppercase italic leading-none max-w-xl">Gestão de Patrocínio do Baba</h2>
+                    <h2 className="text-4xl md:text-6xl font-black uppercase italic leading-none max-w-xl">Patrocínio Amigos da Bola ⚽</h2>
                     <div className="flex gap-10 pt-10 border-t border-white/10">
                        <div className="space-y-1">
                           <span className="text-[10px] font-bold uppercase text-zinc-500">Saldo Disponível</span>
@@ -1508,8 +1723,8 @@ export default function App() {
       <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
         <DialogContent className="rounded-3xl border-none p-8 max-w-lg">
           <DialogHeader>
-            <DialogTitle className="text-3xl font-black uppercase italic">Configurações do App</DialogTitle>
-            <DialogDescription className="uppercase text-[10px] font-bold">Personalize o visual e dados do seu Baba.</DialogDescription>
+            <DialogTitle className="text-3xl font-black uppercase italic">Configurações</DialogTitle>
+            <DialogDescription className="uppercase text-[10px] font-bold">Gerencie os parâmetros do Amigos da Bola ⚽.</DialogDescription>
           </DialogHeader>
           <div className="space-y-6 py-6 border-y border-zinc-100 my-4 h-[60vh] overflow-y-auto pr-2">
              <div className="space-y-2">
@@ -1524,14 +1739,12 @@ export default function App() {
                    </SelectContent>
                 </Select>
              </div>
-             <div className="space-y-2">
-                <Label className="uppercase text-[10px] font-black text-zinc-400">Nome do Baba</Label>
-                <Input value={settings.baba_name} onChange={e => setSettings({...settings, baba_name: e.target.value})} className="rounded-xl h-12 border-zinc-200" />
-             </div>
+             
              <div className="space-y-2">
                 <Label className="uppercase text-[10px] font-black text-zinc-400">Saldo Resenha (Acumulado)</Label>
                 <Input type="number" value={settings.resenha_balance} onChange={e => setSettings({...settings, resenha_balance: e.target.value})} className="rounded-xl h-12 border-zinc-200" />
              </div>
+             
              <div className="space-y-2">
                 <Label className="uppercase text-[10px] font-black text-zinc-400">Cor Principal</Label>
                 <div className="flex gap-4 items-center">
@@ -1539,20 +1752,82 @@ export default function App() {
                   <span className="font-mono text-xs font-bold uppercase">{settings.primary_color}</span>
                 </div>
              </div>
-             <div className="space-y-2">
-                <Label className="uppercase text-[10px] font-black text-zinc-400">Cronômetro Compartilhado</Label>
-                <div className="flex items-center gap-3 bg-zinc-50 p-4 rounded-xl">
-                   <input 
-                      type="checkbox" 
-                      className="h-5 w-5 accent-emerald-500"
-                      checked={settings.sync_timer} 
-                      onChange={e => setSettings({...settings, sync_timer: e.target.checked})} 
-                   />
-                   <span className="text-[10px] font-bold uppercase text-zinc-600 leading-tight">Sincronizar tempo entre todos os dispositivos</span>
+
+             <div className="pt-4 space-y-4">
+                <h4 className="text-xs font-black uppercase italic border-l-2 border-emerald-500 pl-2">Integração Google Sheets</h4>
+                <div className="bg-emerald-50 p-6 rounded-2xl space-y-4">
+                   <p className="text-[10px] font-bold uppercase text-emerald-800 leading-tight">
+                     Vincule seu sistema a uma planilha profissional do Google para receber Membros, Presença, Ranking e Partidas em abas separadas.
+                   </p>
+                   <div className="space-y-1">
+                      <Label className="text-[9px] font-black uppercase opacity-60">ID da Planilha</Label>
+                      <Input 
+                         placeholder="Ex: 1abcd...xyz" 
+                         value={settings.spreadsheet_id || ''} 
+                         onChange={e => setSettings({...settings, spreadsheet_id: e.target.value})} 
+                         className="h-12 rounded-xl bg-white border-emerald-100 font-mono text-xs"
+                      />
+                      {settings.spreadsheet_id && (
+                       <a 
+                         href={`https://docs.google.com/spreadsheets/d/${settings.spreadsheet_id}`} 
+                         target="_blank" rel="noopener noreferrer"
+                         className="text-[9px] font-bold text-emerald-600 underline flex items-center gap-1 mt-1"
+                       >
+                         <ExternalLink size={10} /> Abrir Planilha no Google Docs
+                       </a>
+                      )}
+                   </div>
+
+                   <div className="space-y-1">
+                      <Label className="text-[9px] font-black uppercase opacity-60">Google OAuth Client ID</Label>
+                      <Input 
+                         placeholder="Ex: 123456789-abcdef.apps.googleusercontent.com" 
+                         value={settings.google_client_id || ''} 
+                         onChange={e => setSettings({...settings, google_client_id: e.target.value})} 
+                         className="h-12 rounded-xl bg-white border-emerald-100 font-mono text-xs"
+                      />
+                      <p className="text-[8px] font-bold text-emerald-700 leading-tight mt-1">
+                        ⚠️ Este ID é obrigatório para autenticar no Google. Pegue-o no Console de APIs do Google Cloud.
+                      </p>
+                   </div>
+
+                   <div className="p-4 bg-white/60 border border-emerald-100 rounded-xl space-y-4">
+                      <h5 className="text-[9px] font-black uppercase text-emerald-900 flex items-center gap-2">
+                        <Info size={12} /> Guia de Configuração Profissional (Anti-Perda)
+                      </h5>
+                      <div className="space-y-3">
+                        <div className="space-y-1">
+                          <p className="text-[9px] font-black uppercase text-emerald-700">1. Como criar a Planilha Perfeita:</p>
+                          <ol className="text-[9px] font-medium text-emerald-800 space-y-1 list-decimal ml-4">
+                            <li>Crie uma nova planilha no Google Drive.</li>
+                            <li>Nomeie a planilha como <b>"GESTÃO BABA BOLA"</b>.</li>
+                            <li>Crie exatamente 4 abas com estes nomes: <b>Membros</b>, <b>Presença</b>, <b>Ranking</b>, <b>Partidas</b>.</li>
+                            <li>O sistema preencherá os cabeçalhos automaticamente na primeira sincronização.</li>
+                          </ol>
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-[9px] font-black uppercase text-emerald-700">2. Como Proteger o Link (Persistência):</p>
+                          <ul className="text-[9px] font-medium text-emerald-800 space-y-1 list-disc ml-4">
+                            <li>O ID inserido acima é salvo no banco de dados local (SQLite) e sincronizado com a Nuvem (Firebase).</li>
+                            <li><b>Segurança Total:</b> Se você trocar de celular ou limpar o histórico, o sistema recupera o ID da planilha automaticamente assim que você logar ou o sistema iniciar, buscando na nuvem.</li>
+                            <li>Mantenha o status do Firebase em "CONECTADO" para garantir esta proteção redundante.</li>
+                          </ul>
+                        </div>
+                      </div>
+                   </div>
+
+                   <Button 
+                    onClick={handleSheetsSync}
+                    className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-black uppercase italic rounded-xl flex gap-2 text-xs"
+                   >
+                     <FileSpreadsheet size={18} />
+                     Sincronizar Sistema Completo
+                   </Button>
                 </div>
              </div>
+
              <div className="pt-4 space-y-4">
-                <h4 className="text-xs font-black uppercase italic border-l-2 border-emerald-500 pl-2">Status da Nuvem</h4>
+                <h4 className="text-xs font-black uppercase italic border-l-2 border-zinc-500 pl-2">Status da Nuvem (Firebase)</h4>
                 <div className="bg-zinc-50 p-4 rounded-xl space-y-4">
                    <div className="flex justify-between items-center">
                       <span className="text-[10px] font-black uppercase text-zinc-400">Conexão Firestore</span>
@@ -1759,6 +2034,11 @@ export default function App() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      
+      <footer className="max-w-7xl mx-auto px-8 py-10 text-center space-y-2 opacity-30">
+        <p className="text-[10px] font-black uppercase italic tracking-[0.3em]">Amigos da Bola ⚽ • Enterprise Edition</p>
+        <p className="text-[8px] font-bold uppercase tracking-widest">Desenvolvido por Jaal Silva</p>
+      </footer>
     </div>
   );
 }
