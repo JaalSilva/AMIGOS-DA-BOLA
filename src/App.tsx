@@ -198,15 +198,16 @@ const translations = {
 };
 
 // --- Constants ---
-const DEFAULT_ATHLETES = [
+const atletasIniciais = [
   "Jaal Silva", "Eduardo Santos", "Leandro SPTO", "Ruan Luz", "Ed Willian", 
   "Alexandre BIgode", "André", "Ben-Hur", "Bira", "Caio", "César", 
   "Danilo", "Domingos", "Elias", "Fagner", "Flavio", "Isaac", "Islan", 
   "Jasdon", "Jonata", "Jonathan", "Josemiro", "Leandro Cortes", "Lourival", 
   "Mateus", "Mauricio", "Miguel", "Ruan Nicolas", "Samuel", "Thiago", 
-  "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago",
-  "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto",
-  "Tico", "Jean", "Carlos Alberto", "Gustavo", "Geniselmo", "Moro"
+  "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago", 
+  "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto", 
+  "Tico", "Meco", "Lula", "Bolsonaro", "Ciro", "Moro", "Jaaziel Silva", 
+  "Jean", "Carlos Alberto", "Geniselmo"
 ];
 
 // --- Main Component ---
@@ -719,14 +720,14 @@ export default function App() {
       try {
         savedPlayer = JSON.parse(textResponse);
       } catch (e) {
-        console.warn('[WARN] Resposta não é JSON, assumindo sucesso:', textResponse);
-        if (!res.ok && textResponse.toLowerCase().includes('error')) {
-           throw new Error(textResponse);
+        console.warn('[WARN] Resposta não é JSON:', textResponse);
+        if (!res.ok) {
+           throw new Error('Erro no servidor: ' + textResponse.substring(0, 50));
         }
         savedPlayer = { name: newPlayer.name }; 
       }
       
-      if (!res.ok && !savedPlayer.success) {
+      if (!res.ok) {
         throw new Error(savedPlayer.error || 'Erro ao adicionar atleta');
       }
       
@@ -1399,15 +1400,16 @@ export default function App() {
                <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm">
                   <h2 className="text-2xl font-black uppercase italic tracking-tight">Escritório Amigos da Bola ⚽</h2>
                   <div className="flex gap-3 items-center flex-wrap justify-end">
-                    <Button 
-                      variant="outline"
-                      className="border-2 border-zinc-200 text-zinc-500 hover:text-orange-600 hover:border-orange-600 rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs transition-all"
-                      onClick={async () => {
-                        if(confirm('Deseja cadastrar automaticamente os 50 atletas padrão do código?')) {
+                    {players.length === 0 && (
+                      <Button 
+                        variant="default"
+                        className="bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs shadow-lg animate-bounce"
+                        onClick={async () => {
                           setLoading(true);
                           try {
-                            for(const name of DEFAULT_ATHLETES) {
-                              if(!players.find(p => p.name === name)) {
+                            const currentPlayers = [...players];
+                            for(const name of atletasIniciais) {
+                              if (!currentPlayers.some(p => p.name.toLowerCase() === name.toLowerCase())) {
                                 await fetch('/api/players', {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
@@ -1415,20 +1417,18 @@ export default function App() {
                                 });
                               }
                             }
-                            const pRes = await fetch('/api/players');
-                            const pData = await pRes.json();
-                            setPlayers(pData);
-                            toast.success('Elenco importado com sucesso');
+                            await fetchPlayers();
+                            alert('Atletas importados com sucesso!');
                           } catch (e) {
-                            toast.error('Erro na importação');
+                            alert('Erro na importação. Verifique a conexão.');
                           } finally {
                             setLoading(false);
                           }
-                        }
-                      }}
-                    >
-                      <Users size={16} /> Importar Elenco do Código
-                    </Button>
+                        }}
+                      >
+                        <Users size={16} /> Importar Atletas
+                      </Button>
+                    )}
                     <Button 
                       variant="outline" 
                       className="border-2 border-emerald-100 text-emerald-600 rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs hover:bg-emerald-50"
@@ -1836,7 +1836,7 @@ export default function App() {
                      Vincule seu sistema a uma planilha profissional do Google para receber Membros, Presença, Ranking e Partidas em abas separadas.
                    </p>
                    <div className="space-y-1">
-                      <Label className="text-[9px] font-black uppercase opacity-60">ID da Planilha</Label>
+                      <Label className="text-[9px] font-black uppercase opacity-60">ID da Planilha (Variável: VITE_SPREADSHEET_ID)</Label>
                       <Input 
                          placeholder="Ex: 1abcd...xyz" 
                          value={settings.spreadsheet_id || ''} 
@@ -1855,7 +1855,7 @@ export default function App() {
                    </div>
 
                    <div className="space-y-1">
-                      <Label className="text-[9px] font-black uppercase opacity-60">Google OAuth Client ID</Label>
+                      <Label className="text-[9px] font-black uppercase opacity-60">Google OAuth Client ID (Variável: VITE_GOOGLE_CLIENT_ID)</Label>
                       <Input 
                          placeholder="Ex: 123456789-abcdef.apps.googleusercontent.com" 
                          value={settings.google_client_id || ''} 
@@ -1930,7 +1930,7 @@ export default function App() {
                  <h4 className="text-xs font-black uppercase italic border-l-2 border-purple-500 pl-2">Integração Automação (Make / Webhooks)</h4>
                  <div className="bg-purple-50 p-6 rounded-2xl space-y-4">
                     <div className="space-y-1">
-                       <Label className="text-[9px] font-black uppercase opacity-60">URL do Webhook (Make.com)</Label>
+                       <Label className="text-[9px] font-black uppercase opacity-60">URL do Webhook (Make.com - Variável: VITE_MAKE_WEBHOOK_URL)</Label>
                        <Input 
                           placeholder="https://hook.make.com/..." 
                           value={settings.make_webhook_url || ''} 
@@ -2060,7 +2060,7 @@ export default function App() {
                   <Button 
                     variant="ghost" 
                     className="h-6 text-[9px] font-black uppercase text-orange-600 hover:text-orange-700 p-0"
-                    onClick={() => setManualName(DEFAULT_ATHLETES.join(', '))}
+                    onClick={() => setManualName(atletasIniciais.join(', '))}
                   >
                     Preencher Automático
                   </Button>

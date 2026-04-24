@@ -426,9 +426,10 @@ async function startServer() {
       "Danilo", "Domingos", "Elias", "Fagner", "Flavio", "Isaac", "Islan", 
       "Jasdon", "Jonata", "Jonathan", "Josemiro", "Leandro Cortes", "Lourival", 
       "Mateus", "Mauricio", "Miguel", "Ruan Nicolas", "Samuel", "Thiago", 
-      "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago",
-      "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto",
-      "Tico", "Jean", "Carlos Alberto", "Gustavo", "Geniselmo", "Moro"
+      "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago", 
+      "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto", 
+      "Tico", "Meco", "Lula", "Bolsonaro", "Ciro", "Moro", "Jaaziel Silva", 
+      "Jean", "Carlos Alberto", "Geniselmo"
     ];
     
     console.log("[SEEDER] Checking for missing athletes...");
@@ -1439,6 +1440,19 @@ async function startServer() {
       console.error("[RESTORE] Failed:", e);
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // Helper for 404
+  app.get('/favicon.ico', (req, res) => res.status(204).end());
+
+  // Global JSON Error Handler
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('[SERVER ERROR]', err);
+    res.status(err.status || 500).json({
+      error: true,
+      message: err.message || 'Ocorreu um erro interno no servidor',
+      code: err.code || 'INTERNAL_ERROR'
+    });
   });
 
   // Vite
