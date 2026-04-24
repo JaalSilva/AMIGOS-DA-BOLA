@@ -411,42 +411,59 @@ async function startServer() {
   console.log("[BOOT] Migrated match_session: Added columns check");
 
   // Seeder for requested athletes
-  const seedAthletes = () => {
-    const athletes = [
-      "Jaal Silva", "Eduardo Santos", "Leandro SPTO", "Ruan Luz", "Ed Willian", 
-      "Alexandre BIgode", "André", "Ben-Hur", "Bira", "Caio", "César", 
-      "Danilo", "Domingos", "Elias", "Fagner", "Flavio", "Isaac", "Islan", 
-      "Jasdon", "Jonata", "Jonathan", "Josemiro", "Leandro Cortes", "Lourival", 
-      "Mateus", "Mauricio", "Miguel", "Ruan Nicolas", "Samuel", "Thiago", 
-      "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago", 
-      "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto", 
-      "Tico", "Meco", "Lula", "Bolsonaro", "Ciro", "Moro", "Jaaziel Silva", 
-      "Jean", "Carlos Alberto", "Geniselmo"
-    ];
-    
+  const getAthletesList = () => [
+    "Jaal Silva", "Eduardo Santos", "Leandro SPTO", "Ruan Luz", "Ed Willian", 
+    "Alexandre BIgode", "André", "Ben-Hur", "Bira", "Caio", "César", 
+    "Danilo", "Domingos", "Elias", "Fagner", "Flavio", "Isaac", "Islan", 
+    "Jasdon", "Jonata", "Jonathan", "Josemiro", "Leandro Cortes", "Lourival", 
+    "Mateus", "Mauricio", "Miguel", "Ruan Nicolas", "Samuel", "Thiago", 
+    "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago", 
+    "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto", 
+    "Tico", "Meco", "Lula", "Bolsonaro", "Ciro", "Moro", "Jaaziel Silva", 
+    "Jean", "Carlos Alberto", "Geniselmo"
+  ];
+
+  const seedAthletes = async () => {
+    const athletes = getAthletesList();
     console.log("[SEEDER] Checking for missing athletes...");
-    const insertStmt = db.prepare('INSERT INTO players (id, name, phone, status_payment, updated_at) VALUES (?, ?, ?, ?, ?)');
+    const insertStmt = db.prepare('INSERT INTO players (id, name, phone, congregation, age, status_payment, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
     const checkStmt = db.prepare('SELECT id FROM players WHERE name = ?');
     
     let count = 0;
-    athletes.forEach(name => {
+    for (const name of athletes) {
       const exists = checkStmt.get(name);
       if (!exists) {
         const id = uuidv4();
-        insertStmt.run(id, name, '00000000000', 'PENDENTE', new Date().toISOString());
-        count++;
-        // Trigger sync if firestore available
-        if (firestore) {
-          firestore.collection('players').doc(id).set({
-            id, name, phone: '00000000000', status_payment: 'PENDENTE', updated_at: new Date().toISOString(),
-            migrated_at: new Date().toISOString()
-          }).catch(() => {});
+        const now = new Date().toISOString();
+        try {
+          insertStmt.run(id, name, '00000000000', 'Amigos da Bola', '0', 'PENDENTE', now);
+          count++;
+          if (firestore && isFirestoreAccessible) {
+            firestore.collection('players').doc(id).set({
+              id, name, phone: '00000000000', congregation: 'Amigos da Bola', age: '0', 
+              status_payment: 'PENDENTE', updated_at: now, created_at: now
+            }).catch(() => {});
+          }
+        } catch (e: any) {
+          console.error(`[SEEDER] Error inserting ${name}:`, e.message);
         }
       }
-    });
+    }
     if (count > 0) console.log(`[SEEDER] Added ${count} new athletes.`);
+    return count;
   };
+  
+  // Run on boot
   seedAthletes();
+
+  app.post('/api/admin/seed-athletes', async (req, res) => {
+    try {
+      const count = await seedAthletes();
+      res.json({ success: true, added: count });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
 
   // Initialize and Migrate (Non-blocking)
   console.log("[BOOT] Database initialized. Starting recovery and migration check...");
@@ -939,7 +956,18 @@ async function startServer() {
     if (!firestore || !isFirestoreAccessible) return res.json(fallbackPlayers());
     try {
       const playersSnap = await firestore.collection('players').orderBy('name', 'asc').get();
-      const players = playersSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      let players = playersSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      
+      // Critical Fallback: If Firestore is empty but SQLite is NOT, use SQLite and try to sync
+      if (players.length === 0) {
+        const localPlayers = fallbackPlayers();
+        if (localPlayers.length > 0) {
+          console.log("[SYNC] Firestore is empty but local has data. Falling back to local.");
+          players = localPlayers;
+          // Optionally trigger background sync here
+        }
+      }
+      
       res.json(players);
     } catch (e: any) {
       if (!e.message.includes('PERMISSION_DENIED')) {
@@ -965,29 +993,33 @@ async function startServer() {
       updated_at: new Date().toISOString()
     };
 
-    // Always persist to SQLite
+    // SQLite Persistence
     try {
       db.prepare('INSERT INTO players (id, name, phone, congregation, age, status_payment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(id, name, finalPhone, playerData.congregation, playerData.age, playerData.status_payment, playerData.created_at, playerData.updated_at);
+      console.log(`[STABLE] Local persist success: ${name}`);
     } catch (e: any) {
-      console.error("SQLite player insert failed:", e.message);
+      console.error("❌ [ERROR] SQLite player insert failed:", e.message);
+      // We continue because maybe Firestore will work, or at least we don't crash
     }
 
+    // FIREBASE SYNC (NON-BLOCKING)
     if (firestore && isFirestoreAccessible) {
-      try {
-        await firestore.collection('players').doc(id).set(playerData);
-      } catch (e: any) {
+      firestore.collection('players').doc(id).set(playerData).catch((e: any) => {
         if (e.message.includes('PERMISSION_DENIED')) {
+          console.warn("⚠️ [SYNC] Firestore permissions lost during POST.");
           isFirestoreAccessible = false;
         } else {
-          console.error("Firestore player sync failed:", e.message);
+          console.error("⚠️ [SYNC] Firestore player sync failed:", e.message);
         }
-      }
+      });
     }
 
-    await addSystemLog('CREATE', 'PLAYER', id, `Added player: ${name}`);
+    // AUDIT LOG (NON-BLOCKING)
+    addSystemLog('CREATE', 'PLAYER', id, `Added player: ${name}`).catch(() => {});
+    
     notifyUpdate('PLAYERS');
-    res.json(playerData);
+    return res.json(playerData);
   });
 
   app.patch('/api/players/:id', async (req, res) => {
@@ -1035,46 +1067,40 @@ async function startServer() {
     }
 
     if (firestore && isFirestoreAccessible) {
-      try {
-        await firestore.collection('players').doc(id).update(update);
-      } catch (e: any) {
+      firestore.collection('players').doc(id).update(update).catch((e: any) => {
         if (e.message.includes('PERMISSION_DENIED')) {
           isFirestoreAccessible = false;
         } else {
           console.error("Firestore player update failed:", e.message);
         }
-      }
+      });
     }
 
-    try {
-      await addSystemLog('UPDATE', 'PLAYER', id, `Updated player info: ${JSON.stringify(Object.keys(update))}`);
+    addSystemLog('UPDATE', 'PLAYER', id, `Updated player info: ${JSON.stringify(Object.keys(update))}`).catch(() => {});
       
-      if (status_payment === 'PAGO' || status_payment === 'PAGAMENTO') {
-        const now = new Date();
-        const currentMonth = now.toISOString().slice(0, 7);
-        const isEarly = now.getDate() <= 5;
-        const score = isEarly ? 10 : 0;
-        const reason = isEarly ? 'Bônus: Pagamento até dia 05' : 'Pagamento mensal';
-        const fpId = uuidv4();
-        const fpDate = now.toISOString();
+    if (status_payment === 'PAGO' || status_payment === 'PAGAMENTO') {
+      const now = new Date();
+      const currentMonth = now.toISOString().slice(0, 7);
+      const isEarly = now.getDate() <= 5;
+      const score = isEarly ? 10 : 0;
+      const reason = isEarly ? 'Bônus: Pagamento até dia 05' : 'Pagamento mensal';
+      const fpId = uuidv4();
+      const fpDate = now.toISOString();
 
-        // SQLite Fair Play
-        try {
-          db.prepare('INSERT INTO fair_play (id, player_id, score, reason, category, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-            .run(fpId, id, score, reason, 'PAGAMENTO', fpDate);
-        } catch (e) {}
+      // SQLite Fair Play
+      try {
+        db.prepare('INSERT INTO fair_play (id, player_id, score, reason, category, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(fpId, id, score, reason, 'PAGAMENTO', fpDate);
+      } catch (e) {}
 
-        if (firestore && isFirestoreAccessible && score !== 0) {
-          try {
-            await firestore.collection('fair_play').doc(fpId).set({
-              id: fpId, player_id: id, score, reason, category: 'PAGAMENTO', created_at: fpDate
-            });
-          } catch (e: any) {
-            if (e.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
-          }
-        }
+      if (firestore && isFirestoreAccessible && score !== 0) {
+        firestore.collection('fair_play').doc(fpId).set({
+          id: fpId, player_id: id, score, reason, category: 'PAGAMENTO', created_at: fpDate
+        }).catch((e: any) => {
+          if (e.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
+        });
       }
-    } catch (e) {}
+    }
 
     notifyUpdate('PLAYERS');
     notifyUpdate('RANKING');
@@ -1089,14 +1115,12 @@ async function startServer() {
     } catch (e) {}
 
     if (firestore && isFirestoreAccessible) {
-      try {
-        await firestore.collection('players').doc(id).delete();
-      } catch (e: any) {
+      firestore.collection('players').doc(id).delete().catch((e: any) => {
         if (e.message.includes('PERMISSION_DENIED')) isFirestoreAccessible = false;
-      }
+      });
     }
     
-    await addSystemLog('DELETE', 'PLAYER', id, 'Removed player from system');
+    addSystemLog('DELETE', 'PLAYER', id, 'Removed player from system').catch(() => {});
     notifyUpdate('PLAYERS');
     notifyUpdate('RANKING');
     res.json({ success: true });

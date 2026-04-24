@@ -207,7 +207,7 @@ const atletasIniciais = [
   "Vitor", "Willian", "David Amaral", "Marcio", "Max", "Panda", "Givago", 
   "Felipe", "Luan", "Pedro", "Gustavo", "Igor", "Léo", "Dudu", "Neto", 
   "Tico", "Meco", "Lula", "Bolsonaro", "Ciro", "Moro", "Jaaziel Silva", 
-  "Jean", "Carlos Alberto", "Geniselmo"
+  "Jean", "Carlos Alberto", "Geniselmo", "Vitor", "Thiago Gonzaga", "Matias"
 ];
 
 // --- Main Component ---
@@ -361,10 +361,12 @@ export default function App() {
   const fetchPlayers = useCallback(async () => {
     try {
       const res = await fetch('/api/players');
+      if (!res.ok) throw new Error('API Error');
       const data = await res.json();
       setPlayers(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error('Failed to fetch players', e);
+      toast.error('Erro ao buscar atletas. Verifique a conexão.');
       setPlayers([]);
     }
   }, []);
@@ -430,18 +432,19 @@ export default function App() {
     }
   }, [selectedSender]);
 
-  const fetchTimer = useCallback(async () => {
+  const fetchTimer = useCallback(async (forceSync = false) => {
     try {
       const res = await fetch('/api/match/timer');
       const data = await res.json();
       setMatchSession(data);
-      // Sync display if not running or significantly out of sync
-      // We use a ref for displaySeconds to avoid dependency cycle
-      setDisplaySeconds(data.duration_remaining);
+      // Sync display if status changed significantly, initial load, or forced
+      if (forceSync || !data.is_running || Math.abs(displaySeconds - data.duration_remaining) > 10) {
+        setDisplaySeconds(data.duration_remaining);
+      }
     } catch (e) {
       console.error('Failed to fetch timer', e);
     }
-  }, []);
+  }, []); // Remove displaySeconds dependency to avoid refresh loop
 
   const refreshData = useCallback(async () => {
     setLoading(true);
@@ -487,7 +490,10 @@ export default function App() {
         case 'TIMER_CONTROL':
           if (settings.sync_timer) {
             setMatchSession(event.data);
-            setDisplaySeconds(event.data.duration_remaining);
+            // Only force display sync if status changed or we are reset/paused
+            if (!event.data.is_running || Math.abs(displaySeconds - event.data.duration_remaining) > 5) {
+               setDisplaySeconds(event.data.duration_remaining);
+            }
           }
           break;
       }
@@ -499,13 +505,21 @@ export default function App() {
   }, [fetchPlayers, fetchRanking, fetchSettings, fetchAttendance, settings.sync_timer]);
 
   useEffect(() => {
-    refreshData();
-    fetchSettings();
-    fetchTimer();
+    const init = async () => {
+      setLoading(true);
+      await Promise.all([
+        refreshData(),
+        fetchSettings(),
+        fetchTimer(true)
+      ]);
+      setLoading(false);
+    };
+    init();
+    
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [refreshData, fetchSettings, fetchTimer]);
+  }, []); // Only run on mount
 
   const handleTimerFinish = useCallback(() => {
     toast.error(t('fimDeJogo'), { icon: '⚽', duration: 10000 });
@@ -1409,33 +1423,30 @@ export default function App() {
                <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm">
                   <h2 className="text-2xl font-black uppercase italic tracking-tight">Escritório Amigos da Bola ⚽</h2>
                   <div className="flex gap-3 items-center flex-wrap justify-end">
-                    {players.length === 0 && (
+                    {players.length < 10 && (
                       <Button 
                         variant="default"
                         className="bg-orange-600 hover:bg-orange-700 text-white rounded-xl px-4 h-12 flex gap-2 font-black uppercase italic text-xs shadow-lg animate-bounce"
                         onClick={async () => {
                           setLoading(true);
                           try {
-                            const currentPlayers = [...players];
-                            for(const name of atletasIniciais) {
-                              if (!currentPlayers.some(p => p.name.toLowerCase() === name.toLowerCase())) {
-                                await fetch('/api/players', {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ name, phone: '', congregation: 'Amigos da Bola', age: '0' }),
-                                });
-                              }
+                            const res = await fetch('/api/admin/seed-athletes', { method: 'POST' });
+                            const data = await res.json();
+                            if (data.success) {
+                              toast.success(`Sucesso! ${data.added} atletas adicionados.`);
+                              await fetchPlayers();
+                            } else {
+                              throw new Error(data.error);
                             }
-                            await fetchPlayers();
-                            alert('Atletas importados com sucesso!');
-                          } catch (e) {
-                            alert('Erro na importação. Verifique a conexão.');
+                          } catch (e: any) {
+                            toast.error('Erro na importação: ' + e.message);
                           } finally {
                             setLoading(false);
                           }
                         }}
                       >
-                        <Users size={16} /> Importar Atletas
+                        <Download size={14} />
+                        Importar Lista Oficial (Base de Dados)
                       </Button>
                     )}
                     <Button 
